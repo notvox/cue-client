@@ -198,7 +198,9 @@ def cli():
     
     \b
       notvox cue "song name" 2h      Play a song for 2 hours
+      notvox queue add "song" 30m    Add to playback queue
       notvox status                   Check what's currently playing
+      notvox skip                     Skip to next in queue
       notvox stop                     Stop current playback
     
     \b
@@ -477,6 +479,88 @@ def resume(duration, select):
     By default, resumes with the original duration unless overridden.
     """
     client.resume_session(duration=duration, select=select)
+
+
+@cli.group(name='queue', invoke_without_command=True)
+@click.pass_context
+def queue_group(ctx):
+    """Manage playback queue
+    
+    Queue lets you line up multiple tracks to play sequentially.
+    When a track finishes, the next one starts automatically.
+    
+    \b
+    Commands:
+      notvox queue              Show current queue
+      notvox queue add          Add track to queue  
+      notvox queue remove       Remove track from queue
+      notvox queue clear        Clear entire queue
+    """
+    if ctx.invoked_subcommand is None:
+        # No subcommand, show queue
+        client.show_queue()
+
+
+@queue_group.command(name='add')
+@click.argument('query', metavar='SEARCH_QUERY')
+@click.argument('duration', metavar='DURATION')
+def queue_add(query, duration):
+    """Add a track to the queue
+    
+    If nothing is playing, starts playback immediately.
+    Otherwise, adds to queue to play after current tracks.
+    
+    \b
+    Arguments:
+      SEARCH_QUERY   Song, artist, or album to search for
+      DURATION       How long to play (e.g., 30m, 2h)
+    
+    \b
+    Examples:
+      notvox queue add "Bohemian Rhapsody" 6m
+      notvox queue add "study playlist" 2h
+    """
+    client.add_to_queue(query, duration)
+
+
+@queue_group.command(name='remove')
+@click.argument('position', type=int, metavar='POSITION')
+def queue_remove(position):
+    """Remove a track from the queue by position
+    
+    \b
+    Arguments:
+      POSITION    Queue position number (1-based)
+    
+    \b
+    Example:
+      notvox queue remove 2    # Removes second track in queue
+    """
+    client.remove_from_queue(position)
+
+
+@queue_group.command(name='clear')
+@click.confirmation_option(prompt='Clear entire queue?')
+def queue_clear():
+    """Clear all tracks from the queue
+    
+    Removes all pending tracks. Currently playing track continues.
+    """
+    client.clear_queue()
+
+
+@cli.command()
+def skip():
+    """Skip current track and play next in queue
+    
+    Stops the currently playing track and starts the next
+    track in the queue if available.
+    
+    \b
+    Example:
+      notvox skip
+    """
+    client.skip_track()
 
 
 @cli.command()
