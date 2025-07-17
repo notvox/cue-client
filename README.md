@@ -1,5 +1,11 @@
 # cue-client
+(noun) : something clever never
 
+### what is this?
+this is a little tool that started as a way to troll people who were being nosy about my listening habits.  
+Now I use it as a cli spoitfy controller so I don't have to break my workflow for switching up tracks, managing a queue, searching, etc.  
+
+```
 Usage: notvox [OPTIONS] COMMAND [ARGS]...
 
   NotVox - Network Spotify Control System
@@ -36,3 +42,4 @@ Commands:
   skip     Skip to next track in queue
   status   Show current playback status
   stop     Stop current playback immediately
+```
