@@ -99,15 +99,21 @@ class NotVoxClient:
         data = {"duration": duration}
         result = self.make_request('POST', '/lucky', json=data)
         
-        source_emoji = "[H]" if result['source'] == 'history' else "[R]"
-        click.secho(f"[LUCKY] {result['message']} {source_emoji}", fg='magenta')
+        source = result['source']
+        if source == 'history-notvox':
+            source_text = "(From your NotVox history)"
+            source_color = 'cyan'
+        elif source == 'history-spotify':
+            source_text = "(From your Spotify history)"
+            source_color = 'green'
+        else:
+            source_text = "(New recommendation based on your taste)"
+            source_color = 'magenta'
+        
+        click.secho(f"[LUCKY] {result['message']}", fg=source_color)
         click.echo(f"        Duration: {result['duration']}")
         click.echo(f"        Ends at: {self._format_time(result['ends_at'])}")
-        
-        if result['source'] == 'history':
-            click.echo("        (From your listening history)")
-        else:
-            click.echo("        (New recommendation based on your taste)")
+        click.echo(f"        {source_text}")
         
         return result
     
@@ -207,7 +213,8 @@ def cli():
 @click.argument('query', metavar='SEARCH_QUERY')
 @click.argument('duration', metavar='DURATION')
 @click.option('--lucky', is_flag=True, help='Pick a random song from history or recommendations')
-def cue(query, duration, lucky):
+@click.option('--select', '-s', is_flag=True, help='Show search results and select one')
+def cue(query, duration, lucky, select):
     """Play a track for specified duration
     
     \b
@@ -219,9 +226,8 @@ def cue(query, duration, lucky):
     Examples:
       notvox cue "Bohemian Rhapsody" 2h
       notvox cue "lofi hip hop" 30m
-      notvox cue "rain sounds" 8h
-      notvox cue "Taylor Swift" 45m
-      notvox cue --lucky 2h              # Random from history/recommendations
+      notvox cue --select "taylor swift" 45m   # Choose from results
+      notvox cue --lucky 2h                    # Random from history
     
     \b
     Duration formats:
@@ -232,13 +238,15 @@ def cue(query, duration, lucky):
       90   = 90 minutes (no unit defaults to minutes)
     
     \b
-    Lucky mode:
-      When using --lucky, no search query is needed. NotVox will pick
-      a random track from your history (70%) or new recommendations (30%).
+    Options:
+      --lucky    Pick random track from your history/recommendations
+      --select   Show search results and choose one interactively
     """
     if lucky:
         # For lucky mode, duration is in the query position
         client.play_lucky(query)
+    elif select:
+        client.show_search_results(query, select_mode=True, duration=duration)
     else:
         client.play_track(query, duration)
 
@@ -355,25 +363,32 @@ def config(url, timeout):
 @click.option('--limit', '-n', default=20, help='Number of sessions to show')
 @click.option('--today', is_flag=True, help='Show only today\'s sessions')
 @click.option('--this-week', is_flag=True, help='Show only this week\'s sessions')
-def history(limit, today, this_week):
+@click.option('--combined', '-c', is_flag=True, help='Show combined NotVox + Spotify history')
+def history(limit, today, this_week, combined):
     """Show playback history
     
     Display recent playback sessions with duration, status, and play counts.
     
     \b
     Examples:
-      notvox history              Show last 20 sessions
-      notvox history --limit 5    Show last 5 sessions
+      notvox history              Show last 20 NotVox sessions
+      notvox history --combined   Show NotVox + Spotify history
       notvox history --today      Show today's sessions only
-      notvox history --this-week  Show this week's sessions
+      notvox history --limit 5    Show last 5 sessions
     
     \b
     Status indicators:
       [OK]   - Completed full duration
       [STOP] - Stopped manually
       [PLAY] - Currently playing
+    
+    Combined mode shows your Spotify listening history alongside NotVox
+    sessions to give a complete picture of your music habits.
     """
-    client.show_history(limit=limit, today_only=today, this_week=this_week)
+    if combined:
+        client.show_combined_history(limit=limit)
+    else:
+        client.show_history(limit=limit, today_only=today, this_week=this_week)
 
 
 @cli.command()
@@ -396,6 +411,72 @@ def lucky(duration):
     Songs played in the last 24 hours are excluded to avoid repetition.
     """
     client.play_lucky(duration)
+
+
+@cli.command()
+@click.argument('query', metavar='SEARCH_QUERY')
+def search(query):
+    """Search for tracks without playing
+    
+    Display search results with track details and popularity ratings.
+    
+    \b
+    Arguments:
+      SEARCH_QUERY   Song, artist, or album to search for
+    
+    \b
+    Examples:
+      notvox search "taylor swift"
+      notvox search "jazz piano"
+    
+    \b
+    Popularity indicators:
+      [***] Very popular (80+)
+      [** ] Popular (60-79)
+      [*  ] Moderate (40-59)
+      [   ] Lesser known (<40)
+    """
+    client.show_search_results(query, select_mode=False)
+
+
+@cli.command()
+@click.argument('duration', metavar='DURATION')
+def extend(duration):
+    """Extend or reduce current playback session
+    
+    Add or subtract time from the currently playing track.
+    Use negative durations to reduce time.
+    
+    \b
+    Arguments:
+      DURATION    Time to add/subtract (e.g., 30m, -10m, 1h)
+    
+    \b
+    Examples:
+      notvox extend 30m     # Add 30 minutes
+      notvox extend -10m    # Reduce by 10 minutes
+      notvox extend 1h      # Add 1 hour
+    """
+    client.extend_session(duration)
+
+
+@cli.command()
+@click.option('--duration', '-d', metavar='DURATION', help='Override original duration')
+@click.option('--select', '-s', is_flag=True, help='Choose from recent stopped sessions')
+def resume(duration, select):
+    """Resume a previously stopped session
+    
+    Resume the last stopped session or choose from recent ones.
+    
+    \b
+    Examples:
+      notvox resume                    # Resume last stopped session
+      notvox resume --duration 1h      # Resume with new duration
+      notvox resume --select           # Choose which session to resume
+    
+    By default, resumes with the original duration unless overridden.
+    """
+    client.resume_session(duration=duration, select=select)
 
 
 @cli.command()
