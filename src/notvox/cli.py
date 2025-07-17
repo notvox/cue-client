@@ -137,6 +137,11 @@ class NotVoxClient:
         
         return result
     
+    def _format_time(self, iso_time):
+        """Format ISO time string to human readable"""
+        dt = datetime.fromisoformat(iso_time.replace('Z', '+00:00'))
+        return dt.strftime("%I:%M %p")
+    
     def get_history(self, limit=20, since=None):
         """Get playback history"""
         params = {'limit': limit}
@@ -145,6 +150,57 @@ class NotVoxClient:
         
         result = self.make_request('GET', '/history', params=params)
         return result
+    
+    def show_history(self, limit=20, today_only=False, this_week=False):
+        """Display playback history"""
+        since = None
+        if today_only:
+            since = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+        elif this_week:
+            since = (datetime.now() - timedelta(days=7)).isoformat()
+        
+        history = self.get_history(limit=limit, since=since)
+        sessions = history.get('sessions', [])
+        
+        if not sessions:
+            click.echo("No playback history found.")
+            return
+        
+        click.echo("Recent playback sessions:\n")
+        
+        for i, session in enumerate(sessions, 1):
+            # Format track name
+            track = session['track_name']
+            if len(track) > 50:
+                track = track[:47] + "..."
+            
+            # Format duration
+            duration = self.format_duration(session['duration_seconds'])
+            
+            # Format time
+            relative_time = self.format_relative_time(session['start_time'])
+            
+            # Format status
+            status = session['status']
+            if status == 'completed':
+                status_color = 'green'
+                status_symbol = '[OK]'
+            elif status == 'stopped':
+                status_color = 'yellow'
+                status_symbol = '[STOP]'
+            else:
+                status_color = 'cyan'
+                status_symbol = '[PLAY]'
+            
+            # Play count
+            play_count = session.get('play_count', 1)
+            play_indicator = f"(played {play_count}x)" if play_count > 1 else ""
+            
+            # Display entry
+            click.echo(f"[{i}] {track} - {duration}")
+            click.echo(f"    Started: {relative_time} {play_indicator}")
+            click.secho(f"    Status: {status_symbol} {status}", fg=status_color)
+            click.echo()
     
     def format_duration(self, seconds):
         """Format seconds to human readable duration"""
@@ -181,6 +237,276 @@ class NotVoxClient:
             return f"{delta.days} days ago"
         else:
             return dt.strftime("%b %d, %Y")
+    
+    def extend_session(self, duration_str):
+        """Extend or reduce current session"""
+        data = {"duration": duration_str}
+        result = self.make_request('POST', '/extend', json=data)
+        
+        action = "extended" if not duration_str.startswith('-') else "reduced"
+        click.secho(f"[OK] Session {action} by {duration_str}", fg='green')
+        click.echo(f"     New end time: {self._format_time(result['new_end_time'])}")
+        
+        return result
+    
+    def search_tracks(self, query, limit=5):
+        """Search for tracks"""
+        params = {'q': query, 'limit': limit}
+        result = self.make_request('GET', '/search', params=params)
+        return result
+    
+    def play_track_uri(self, uri, name, duration):
+        """Play a specific track by URI"""
+        data = {"uri": uri, "name": name, "duration": duration}
+        result = self.make_request('POST', '/play-uri', json=data)
+        
+        click.secho(f"[OK] {result['message']}", fg='green')
+        click.echo(f"     Duration: {result['duration']}")
+        click.echo(f"     Ends at: {self._format_time(result['ends_at'])}")
+        
+        return result
+    
+    def show_search_results(self, query, select_mode=False, duration=None):
+        """Display search results, optionally allow selection"""
+        results = self.search_tracks(query, limit=10 if select_mode else 5)
+        tracks = results.get('tracks', [])
+        
+        if not tracks:
+            click.secho(f"[ERROR] No tracks found for '{query}'", fg='red')
+            return None
+        
+        click.echo(f"\nSearch results for: {query}\n")
+        
+        for i, track in enumerate(tracks, 1):
+            # Format duration from milliseconds
+            duration_min = track['duration_ms'] // 60000
+            duration_sec = (track['duration_ms'] % 60000) // 1000
+            track_duration = f"{duration_min}:{duration_sec:02d}"
+            
+            # Popularity indicator
+            pop = track['popularity']
+            if pop >= 80:
+                pop_indicator = "[***]"
+            elif pop >= 60:
+                pop_indicator = "[** ]"
+            elif pop >= 40:
+                pop_indicator = "[*  ]"
+            else:
+                pop_indicator = "[   ]"
+            
+            click.echo(f"[{i}] {track['name']} - {track['artist']}")
+            click.echo(f"    Album: {track['album']} ({track_duration}) {pop_indicator}")
+            click.echo()
+        
+        if select_mode and duration:
+            # Interactive selection
+            while True:
+                try:
+                    choice = click.prompt("\nSelect track number (or 0 to cancel)", type=int)
+                    if choice == 0:
+                        click.echo("Cancelled.")
+                        return None
+                    elif 1 <= choice <= len(tracks):
+                        selected = tracks[choice - 1]
+                        track_name = f"{selected['name']} by {selected['artist']}"
+                        self.play_track_uri(selected['uri'], track_name, duration)
+                        return selected
+                    else:
+                        click.secho(f"Please enter a number between 1 and {len(tracks)}", fg='yellow')
+                except (ValueError, EOFError, KeyboardInterrupt):
+                    click.echo("\nCancelled.")
+                    return None
+        
+        return tracks
+    
+    def resume_session(self, duration=None, select=False):
+        """Resume a previous session"""
+        if select:
+            # Show recent stopped sessions to choose from
+            history = self.get_history(limit=10)
+            stopped_sessions = [s for s in history.get('sessions', []) if s['status'] == 'stopped']
+            
+            if not stopped_sessions:
+                click.secho("[ERROR] No stopped sessions to resume", fg='red')
+                return None
+            
+            click.echo("Recent stopped sessions:\n")
+            for i, session in enumerate(stopped_sessions[:5], 1):
+                track = session['track_name']
+                if len(track) > 50:
+                    track = track[:47] + "..."
+                relative_time = self.format_relative_time(session['start_time'])
+                original_duration = self.format_duration(session['duration_seconds'])
+                
+                click.echo(f"[{i}] {track}")
+                click.echo(f"    Stopped: {relative_time} (was {original_duration})")
+                click.echo()
+            
+            while True:
+                try:
+                    choice = click.prompt("\nSelect session to resume (or 0 to cancel)", type=int)
+                    if choice == 0:
+                        click.echo("Cancelled.")
+                        return None
+                    elif 1 <= choice <= len(stopped_sessions):
+                        selected = stopped_sessions[choice - 1]
+                        data = {"session_id": selected['id']}
+                        if duration:
+                            data['duration'] = duration
+                        
+                        result = self.make_request('POST', '/resume', json=data)
+                        click.secho(f"[OK] {result['message']}", fg='green')
+                        click.echo(f"     Duration: {result['duration']}")
+                        click.echo(f"     Ends at: {self._format_time(result['ends_at'])}")
+                        return result
+                    else:
+                        click.secho(f"Please enter a number between 1 and {len(stopped_sessions)}", fg='yellow')
+                except (ValueError, EOFError, KeyboardInterrupt):
+                    click.echo("\nCancelled.")
+                    return None
+        else:
+            # Resume last stopped session
+            data = {}
+            if duration:
+                data['duration'] = duration
+            
+            result = self.make_request('POST', '/resume', json=data)
+            click.secho(f"[OK] {result['message']}", fg='green')
+            click.echo(f"     Duration: {result['duration']}")
+            click.echo(f"     Ends at: {self._format_time(result['ends_at'])}")
+            return result
+    
+    def get_spotify_history(self):
+        """Get recently played from Spotify"""
+        result = self.make_request('GET', '/spotify-history')
+        return result
+    
+    def show_combined_history(self, limit=20):
+        """Show combined NotVox and Spotify history"""
+        # Get NotVox history
+        notvox_history = self.get_history(limit=limit)
+        notvox_sessions = notvox_history.get('sessions', [])
+        
+        # Get Spotify history
+        try:
+            spotify_history = self.get_spotify_history()
+            spotify_tracks = spotify_history.get('tracks', [])
+        except:
+            spotify_tracks = []
+        
+        click.echo("Combined playback history:\n")
+        
+        # Show recent NotVox sessions
+        if notvox_sessions:
+            click.secho("[NotVox History]", fg='cyan', bold=True)
+            for i, session in enumerate(notvox_sessions[:10], 1):
+                track = session['track_name']
+                if len(track) > 50:
+                    track = track[:47] + "..."
+                
+                duration = self.format_duration(session['duration_seconds'])
+                relative_time = self.format_relative_time(session['start_time'])
+                play_count = session.get('play_count', 1)
+                
+                click.echo(f"{i:2d}. {track} - {duration}")
+                play_indicator = f"(played {play_count}x)" if play_count > 1 else ""
+                click.echo(f"    {relative_time} {play_indicator}")
+        
+        # Show Spotify history
+        if spotify_tracks:
+            click.echo()
+            click.secho("[Spotify History]", fg='green', bold=True)
+            for i, track in enumerate(spotify_tracks[:10], 1):
+                name = f"{track['name']} - {track['artist']}"
+                if len(name) > 50:
+                    name = name[:47] + "..."
+                
+                play_count = track.get('spotify_play_count', 1)
+                relative_time = self.format_relative_time(track['played_at'])
+                
+                click.echo(f"{i:2d}. {name}")
+                play_indicator = f"(played {play_count}x recently)" if play_count > 1 else ""
+                click.echo(f"    {relative_time} {play_indicator}")
+        
+        if not notvox_sessions and not spotify_tracks:
+            click.echo("No playback history found.")
+        else:
+            click.echo()
+            click.echo("Lucky mode uses this combined history to pick tracks you'll enjoy!")
+    
+    def add_to_queue(self, query, duration):
+        """Add track to queue"""
+        data = {"query": query, "duration": duration}
+        result = self.make_request('POST', '/queue/add', json=data)
+        
+        if result.get('position') == 1 and 'started playing' in result.get('message', ''):
+            click.secho(f"[OK] {result['message']}", fg='green')
+        else:
+            click.secho(f"[QUEUED] {result['message']}", fg='cyan')
+            click.echo(f"         Position in queue: #{result['position']}")
+            click.echo(f"         Duration: {result['duration']}")
+        
+        return result
+    
+    def get_queue(self):
+        """Get current queue"""
+        result = self.make_request('GET', '/queue')
+        return result
+    
+    def show_queue(self):
+        """Display current queue"""
+        queue_data = self.get_queue()
+        queue_items = queue_data.get('queue', [])
+        
+        if not queue_items:
+            click.echo("Queue is empty.")
+            return
+        
+        click.echo("Current queue:\n")
+        
+        total_seconds = 0
+        for i, item in enumerate(queue_items, 1):
+            track = item['track_name']
+            if len(track) > 50:
+                track = track[:47] + "..."
+            
+            duration = self.format_duration(item['duration_seconds'])
+            total_seconds += item['duration_seconds']
+            
+            click.echo(f"[{i}] {track} - {duration}")
+            
+        click.echo(f"\nTotal queue time: {self.format_duration(total_seconds)}")
+        
+        if queue_data.get('currently_playing_from_queue'):
+            click.echo("\n(Currently playing track is from queue)")
+    
+    def remove_from_queue(self, position):
+        """Remove item from queue by position"""
+        # First get the queue to find the ID
+        queue_data = self.get_queue()
+        queue_items = queue_data.get('queue', [])
+        
+        if position < 1 or position > len(queue_items):
+            click.secho(f"[ERROR] Invalid position. Queue has {len(queue_items)} items.", fg='red')
+            return None
+        
+        item = queue_items[position - 1]
+        result = self.make_request('DELETE', f'/queue/{item["id"]}')
+        
+        click.secho(f"[OK] Removed '{item['track_name']}' from queue", fg='green')
+        return result
+    
+    def clear_queue(self):
+        """Clear entire queue"""
+        result = self.make_request('DELETE', '/queue/clear')
+        click.secho(f"[OK] {result['message']}", fg='green')
+        return result
+    
+    def skip_track(self):
+        """Skip current track"""
+        result = self.make_request('POST', '/skip')
+        click.secho(f"[SKIP] {result['message']}", fg='yellow')
+        return result
 
 
 # Create client instance
@@ -212,40 +538,13 @@ def cli():
 
 
 @cli.command()
-@click.argument('query', metavar='SEARCH_QUERY')
-@click.argument('duration', metavar='DURATION')
-@click.option('--lucky', is_flag=True, help='Pick a random song from history or recommendations')
-@click.option('--select', '-s', is_flag=True, help='Show search results and select one')
+@click.argument('query')
+@click.argument('duration')
+@click.option('--lucky', is_flag=True, help='Pick a random song')
+@click.option('--select', '-s', is_flag=True, help='Select from results')
 def cue(query, duration, lucky, select):
-    """Play a track for specified duration
-    
-    \b
-    Arguments:
-      SEARCH_QUERY   Song, artist, or album to search for
-      DURATION       How long to play (e.g., 30m, 2h, 1d, 90s)
-    
-    \b
-    Examples:
-      notvox cue "Bohemian Rhapsody" 2h
-      notvox cue "lofi hip hop" 30m
-      notvox cue --select "taylor swift" 45m   # Choose from results
-      notvox cue --lucky 2h                    # Random from history
-    
-    \b
-    Duration formats:
-      30s  = 30 seconds
-      45m  = 45 minutes  
-      2h   = 2 hours
-      1d   = 1 day
-      90   = 90 minutes (no unit defaults to minutes)
-    
-    \b
-    Options:
-      --lucky    Pick random track from your history/recommendations
-      --select   Show search results and choose one interactively
-    """
+    """Play a track for specified duration"""
     if lucky:
-        # For lucky mode, duration is in the query position
         client.play_lucky(query)
     elif select:
         client.show_search_results(query, select_mode=True, duration=duration)
@@ -255,91 +554,35 @@ def cue(query, duration, lucky, select):
 
 @cli.group(name='quietly', invoke_without_command=False)
 def quietly_group():
-    """Run commands with minimal output
-    
-    Suppress non-essential output for use in scripts or cron jobs.
-    
-    \b
-    Example:
-      notvox quietly cue "white noise" 8h
-    
-    Only errors will be displayed when using quietly.
-    """
+    """Run commands with minimal output"""
     pass
 
 
 @quietly_group.command(name='cue')
-@click.argument('query', metavar='SEARCH_QUERY')
-@click.argument('duration', metavar='DURATION')
+@click.argument('query')
+@click.argument('duration')
 def quietly_cue(query, duration):
-    """Play a track quietly (minimal output)
-    
-    Same as 'notvox cue' but suppresses all output except errors.
-    Perfect for scripts, cron jobs, or background automation.
-    
-    \b
-    Arguments:
-      SEARCH_QUERY   Song, artist, or album to search for
-      DURATION       How long to play (e.g., 30m, 2h, 1d)
-    
-    \b
-    Example:
-      notvox quietly cue "rain sounds" 8h
-    """
+    """Play a track quietly (minimal output)"""
     client.play_track(query, duration, quiet=True)
 
 
 @cli.command()
 def stop():
-    """Stop current playback immediately
-    
-    Stops whatever is currently playing and cancels any remaining time.
-    
-    \b
-    Example:
-      notvox stop
-    """
+    """Stop current playback immediately"""
     client.stop_playback()
 
 
 @cli.command()
 def status():
-    """Show current playback status
-    
-    Displays information about the currently playing track including
-    time remaining and when it will end.
-    
-    \b
-    Example:
-      notvox status
-    
-    \b
-    Output includes:
-      - Currently playing track
-      - Start and end times
-      - Time remaining
-    """
+    """Show current playback status"""
     client.get_status()
 
 
 @cli.command()
-@click.option('--url', metavar='URL', help='NotVox server URL (e.g., http://192.168.1.100:8080)')
-@click.option('--timeout', metavar='SECONDS', type=int, help='Request timeout in seconds (default: 30)')
+@click.option('--url', help='Server URL')
+@click.option('--timeout', type=int, help='Request timeout')
 def config(url, timeout):
-    """Configure NotVox client settings
-    
-    View or modify the NotVox client configuration. Settings are saved
-    to ~/.notvoxrc and persist between sessions.
-    
-    \b
-    Examples:
-      notvox config                         Show current configuration
-      notvox config --url http://pi:8080    Set server URL
-      notvox config --timeout 60            Set 60 second timeout
-    
-    \b
-    Configuration file location: ~/.notvoxrc
-    """
+    """Configure NotVox client settings"""
     current_config = client.config.copy()
     
     if url:
@@ -354,7 +597,6 @@ def config(url, timeout):
         client.save_config(current_config)
         click.secho("[OK] Configuration saved", fg='green')
     else:
-        # Show current config
         click.echo("Current configuration:")
         click.echo(f"  Server URL: {current_config['server_url']}")
         click.echo(f"  Timeout: {current_config['timeout']}s")
@@ -362,31 +604,12 @@ def config(url, timeout):
 
 
 @cli.command()
-@click.option('--limit', '-n', default=20, help='Number of sessions to show')
-@click.option('--today', is_flag=True, help='Show only today\'s sessions')
-@click.option('--this-week', is_flag=True, help='Show only this week\'s sessions')
-@click.option('--combined', '-c', is_flag=True, help='Show combined NotVox + Spotify history')
+@click.option('--limit', '-n', default=20, help='Number to show')
+@click.option('--today', is_flag=True, help='Today only')
+@click.option('--this-week', is_flag=True, help='This week only')
+@click.option('--combined', '-c', is_flag=True, help='Include Spotify history')
 def history(limit, today, this_week, combined):
-    """Show playback history
-    
-    Display recent playback sessions with duration, status, and play counts.
-    
-    \b
-    Examples:
-      notvox history              Show last 20 NotVox sessions
-      notvox history --combined   Show NotVox + Spotify history
-      notvox history --today      Show today's sessions only
-      notvox history --limit 5    Show last 5 sessions
-    
-    \b
-    Status indicators:
-      [OK]   - Completed full duration
-      [STOP] - Stopped manually
-      [PLAY] - Currently playing
-    
-    Combined mode shows your Spotify listening history alongside NotVox
-    sessions to give a complete picture of your music habits.
-    """
+    """Show playback history"""
     if combined:
         client.show_combined_history(limit=limit)
     else:
@@ -394,199 +617,79 @@ def history(limit, today, this_week, combined):
 
 
 @cli.command()
-@click.argument('duration', metavar='DURATION')
+@click.argument('duration')
 def lucky(duration):
-    """Play a random track based on your taste
-    
-    Picks a track from your listening history (70% chance) or
-    discovers something new based on your preferences (30% chance).
-    
-    \b
-    Arguments:
-      DURATION    How long to play (e.g., 30m, 2h, 1d)
-    
-    \b
-    Examples:
-      notvox lucky 2h      # Random 2-hour session
-      notvox lucky 30m     # Quick random pick
-    
-    Songs played in the last 24 hours are excluded to avoid repetition.
-    """
+    """Play a random track based on your taste"""
     client.play_lucky(duration)
 
 
 @cli.command()
-@click.argument('query', metavar='SEARCH_QUERY')
+@click.argument('query')
 def search(query):
-    """Search for tracks without playing
-    
-    Display search results with track details and popularity ratings.
-    
-    \b
-    Arguments:
-      SEARCH_QUERY   Song, artist, or album to search for
-    
-    \b
-    Examples:
-      notvox search "taylor swift"
-      notvox search "jazz piano"
-    
-    \b
-    Popularity indicators:
-      [***] Very popular (80+)
-      [** ] Popular (60-79)
-      [*  ] Moderate (40-59)
-      [   ] Lesser known (<40)
-    """
+    """Search for tracks without playing"""
     client.show_search_results(query, select_mode=False)
 
 
 @cli.command()
-@click.argument('duration', metavar='DURATION')
+@click.argument('duration')
 def extend(duration):
-    """Extend or reduce current playback session
-    
-    Add or subtract time from the currently playing track.
-    Use negative durations to reduce time.
-    
-    \b
-    Arguments:
-      DURATION    Time to add/subtract (e.g., 30m, -10m, 1h)
-    
-    \b
-    Examples:
-      notvox extend 30m     # Add 30 minutes
-      notvox extend -10m    # Reduce by 10 minutes
-      notvox extend 1h      # Add 1 hour
-    """
+    """Extend or reduce current playback session"""
     client.extend_session(duration)
 
 
 @cli.command()
-@click.option('--duration', '-d', metavar='DURATION', help='Override original duration')
-@click.option('--select', '-s', is_flag=True, help='Choose from recent stopped sessions')
+@click.option('--duration', '-d', help='Override duration')
+@click.option('--select', '-s', is_flag=True, help='Choose session')
 def resume(duration, select):
-    """Resume a previously stopped session
-    
-    Resume the last stopped session or choose from recent ones.
-    
-    \b
-    Examples:
-      notvox resume                    # Resume last stopped session
-      notvox resume --duration 1h      # Resume with new duration
-      notvox resume --select           # Choose which session to resume
-    
-    By default, resumes with the original duration unless overridden.
-    """
+    """Resume a previously stopped session"""
     client.resume_session(duration=duration, select=select)
 
 
 @cli.group(name='queue', invoke_without_command=True)
 @click.pass_context
 def queue_group(ctx):
-    """Manage playback queue
-    
-    Queue lets you line up multiple tracks to play sequentially.
-    When a track finishes, the next one starts automatically.
-    
-    \b
-    Commands:
-      notvox queue              Show current queue
-      notvox queue add          Add track to queue  
-      notvox queue remove       Remove track from queue
-      notvox queue clear        Clear entire queue
-    """
+    """Manage playback queue"""
     if ctx.invoked_subcommand is None:
-        # No subcommand, show queue
         client.show_queue()
 
 
 @queue_group.command(name='add')
-@click.argument('query', metavar='SEARCH_QUERY')
-@click.argument('duration', metavar='DURATION')
+@click.argument('query')
+@click.argument('duration')
 def queue_add(query, duration):
-    """Add a track to the queue
-    
-    If nothing is playing, starts playback immediately.
-    Otherwise, adds to queue to play after current tracks.
-    
-    \b
-    Arguments:
-      SEARCH_QUERY   Song, artist, or album to search for
-      DURATION       How long to play (e.g., 30m, 2h)
-    
-    \b
-    Examples:
-      notvox queue add "Bohemian Rhapsody" 6m
-      notvox queue add "study playlist" 2h
-    """
+    """Add a track to the queue"""
     client.add_to_queue(query, duration)
 
 
 @queue_group.command(name='remove')
-@click.argument('position', type=int, metavar='POSITION')
+@click.argument('position', type=int)
 def queue_remove(position):
-    """Remove a track from the queue by position
-    
-    \b
-    Arguments:
-      POSITION    Queue position number (1-based)
-    
-    \b
-    Example:
-      notvox queue remove 2    # Removes second track in queue
-    """
+    """Remove a track from the queue"""
     client.remove_from_queue(position)
 
 
 @queue_group.command(name='clear')
 @click.confirmation_option(prompt='Clear entire queue?')
 def queue_clear():
-    """Clear all tracks from the queue
-    
-    Removes all pending tracks. Currently playing track continues.
-    """
+    """Clear all tracks from the queue"""
     client.clear_queue()
 
 
 @cli.command()
 def skip():
-    """Skip current track and play next in queue
-    
-    Stops the currently playing track and starts the next
-    track in the queue if available.
-    
-    \b
-    Example:
-      notvox skip
-    """
+    """Skip to next track in queue"""
     client.skip_track()
 
 
 @cli.command()
 def health():
-    """Check server health and connection
-    
-    Tests the connection to the NotVox server and displays its status,
-    including whether Spotify is properly authenticated.
-    
-    \b
-    Example:
-      notvox health
-    
-    \b
-    Shows:
-      - Server connectivity status
-      - Spotify authentication status
-      - Server timestamp
-    """
+    """Check server health and connection"""
     try:
         result = client.make_request('GET', '/health')
         click.secho("[OK] Server is healthy", fg='green')
         click.echo(f"     Spotify connected: {'Yes' if result['spotify_connected'] else 'No'}")
         click.echo(f"     Server time: {client._format_time(result['timestamp'])}")
     except SystemExit:
-        # Already handled by make_request
         pass
 
 
