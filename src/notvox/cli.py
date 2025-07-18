@@ -10,7 +10,7 @@ import click
 import requests
 from pathlib import Path
 from datetime import datetime, timedelta
-from modes import ModeManager
+from .modes import ModeManager
 
 # Default configuration
 DEFAULT_CONFIG = {
@@ -890,6 +890,137 @@ def sleep(duration):
         click.echo(f"             Now playing: {result['track']}")
     click.echo(f"             Duration: {result['duration']}")
 
+# VOLUME & DEVICE COMMANDS
+@cli.command()
+@click.argument('level', required=False)
+def volume(level):
+    """Set or get volume (0-100 or +/-10)"""
+    if not level:
+        # Get current volume
+        try:
+            result = client.make_request('GET', '/volume')
+            click.echo(f"Current volume: {result['volume']}%")
+        except SystemExit:
+            pass
+    else:
+        # Set volume
+        data = {"volume": level}
+        result = client.make_request('POST', '/volume', json=data)
+        click.secho(f"[OK] Volume set to {result['volume']}%", fg='green')
+
+
+@cli.group(name='device', invoke_without_command=True)
+@click.pass_context  
+def device_group(ctx):
+    """Manage Spotify devices"""
+    if ctx.invoked_subcommand is None:
+        # Show devices if no subcommand
+        result = client.make_request('GET', '/devices')
+        devices = result.get('devices', [])
+        active = result.get('active_device')
+        
+        if not devices:
+            click.echo("No Spotify devices found")
+            return
+        
+        click.echo("Available Spotify devices:\n")
+        for device in devices:
+            status = "[ACTIVE]" if device['is_active'] else "        "
+            type_emoji = {
+                'Computer': '💻',
+                'Smartphone': '📱',
+                'Speaker': '🔊',
+                'TV': '📺',
+                'AVR': '🎚️',
+                'CastVideo': '📺',
+                'CastAudio': '🔊'
+            }.get(device['type'], '🎵')
+            
+            click.echo(f"{status} {type_emoji}  {device['name']}")
+            click.echo(f"         Type: {device['type']} | Volume: {device['volume']}%")
+            if device['is_restricted']:
+                click.echo(f"         ⚠️  Restricted device")
+            click.echo()
+
+
+@device_group.command(name='list')
+def device_list():
+    """List all available devices"""
+    result = client.make_request('GET', '/devices')
+    devices = result.get('devices', [])
+    
+    if not devices:
+        click.echo("No Spotify devices found")
+        return
+    
+    click.echo("Available Spotify devices:\n")
+    for i, device in enumerate(devices, 1):
+        active = "🟢" if device['is_active'] else "⚪"
+        click.echo(f"{active} [{i}] {device['name']}")
+        click.echo(f"      Type: {device['type']}")
+        click.echo(f"      Volume: {device['volume']}%")
+        click.echo(f"      ID: {device['id'][:8]}...")
+        click.echo()
+
+
+@device_group.command(name='switch')
+@click.argument('device_name')
+def device_switch(device_name):
+    """Switch playback to a different device"""
+    data = {"device": device_name}
+    result = client.make_request('POST', '/device/transfer', json=data)
+    
+    device = result.get('device', {})
+    click.secho(f"[OK] {result['message']}", fg='green')
+    click.echo(f"     Device type: {device.get('type', 'Unknown')}")
+    click.echo(f"     Volume: {device.get('volume', 0)}%")
+
+
+@device_group.command(name='transfer')
+@click.argument('device_name')
+def device_transfer(device_name):
+    """Transfer playback to device (alias for switch)"""
+    data = {"device": device_name}
+    result = client.make_request('POST', '/device/transfer', json=data)
+    
+    device = result.get('device', {})
+    click.secho(f"[OK] {result['message']}", fg='green')
+
+
+# Quick volume shortcuts
+@cli.command(name='vol')
+@click.argument('level')
+def vol(level):
+    """Quick volume control (shortcut for volume)"""
+    data = {"volume": level}
+    result = client.make_request('POST', '/volume', json=data)
+    click.secho(f"[OK] Volume: {result['volume']}%", fg='green')
+
+
+@cli.command(name='louder')
+@click.argument('amount', default=10)
+def louder(amount):
+    """Increase volume"""
+    data = {"volume": f"+{amount}"}
+    result = client.make_request('POST', '/volume', json=data)
+    click.secho(f"[OK] Volume increased to {result['volume']}%", fg='green')
+
+
+@cli.command(name='quieter')
+@click.argument('amount', default=10)
+def quieter(amount):
+    """Decrease volume"""
+    data = {"volume": f"-{amount}"}
+    result = client.make_request('POST', '/volume', json=data)
+    click.secho(f"[OK] Volume decreased to {result['volume']}%", fg='green')
+
+
+@cli.command(name='mute')
+def mute():
+    """Mute playback (set volume to 0)"""
+    data = {"volume": "0"}
+    result = client.make_request('POST', '/volume', json=data)
+    click.secho(f"[MUTED] Volume: 0%", fg='yellow')
 
 if __name__ == '__main__':
     cli()
