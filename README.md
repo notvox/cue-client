@@ -31,15 +31,26 @@ Options:
 Commands:
   config   Configure NotVox client settings
   cue      Play a track for specified duration
+  device   Manage Spotify devices
   extend   Extend or reduce current playback session
+  focus    Quick start focus mode
   health   Check server health and connection
   history  Show playback history
+  louder   Increase volume
   lucky    Play a random track based on your taste
+  mode     Manage NotVox playback modes
+  mute     Mute playback (set volume to 0)
+  party    Quick start party mode
   queue    Manage playback queue
+  quieter  Decrease volume
   quietly  Run commands with minimal output
   resume   Resume a previously stopped session
   search   Search for tracks without playing
   skip     Skip to next track in queue
+  sleep    Quick start sleep mode
   status   Show current playback status
   stop     Stop current playback immediately
+  vol      Quick volume control (shortcut for volume)
+  volume   Set or get volume (0-100 or +/-10)
+  workout  Quick start workout mode
 ```
