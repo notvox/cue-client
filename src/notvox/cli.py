@@ -10,6 +10,7 @@ import click
 import requests
 from pathlib import Path
 from datetime import datetime, timedelta
+from .modes import ModeManager
 
 # Default configuration
 DEFAULT_CONFIG = {
@@ -692,6 +693,334 @@ def health():
     except SystemExit:
         pass
 
+
+# MODE COMMANDS
+@cli.group(name='mode', invoke_without_command=True)
+@click.pass_context
+def mode_group(ctx):
+    """Manage NotVox playback modes"""
+    if ctx.invoked_subcommand is None:
+        # Show current mode if no subcommand
+        result = client.make_request('GET', '/mode/current')
+        mode = result.get('mode')
+        if mode:
+            click.secho(f"[CURRENT MODE] {mode}", fg='cyan')
+            if 'config' in result:
+                config = result['config']
+                click.echo(f"  Description: {config.get('description', 'N/A')}")
+                click.echo(f"  Duration: {config.get('duration', 'N/A')}")
+                click.echo(f"  Volume: {config.get('volume', 'N/A')}")
+        else:
+            click.echo("No active mode")
+
+
+@mode_group.command(name='list')
+def mode_list():
+    """List all available modes"""
+    result = client.make_request('GET', '/modes')
+    modes = result.get('modes', {})
+    
+    if not modes:
+        click.echo("No modes available")
+        return
+    
+    click.echo("Available modes:\n")
+    for name, config in modes.items():
+        click.secho(f"[{name}]", fg='cyan', bold=True)
+        click.echo(f"  {config['description']}")
+        click.echo(f"  Duration: {config['duration']} | Volume: {config['volume']}")
+        click.echo()
+
+
+@mode_group.command(name='start')
+@click.argument('mode_name')
+@click.option('--duration', '-d', help='Override default duration')
+@click.option('--volume', '-v', type=int, help='Override default volume')
+def mode_start(mode_name, duration, volume):
+    """Start a specific mode"""
+    data = {"mode": mode_name}
+    if duration:
+        data['duration'] = duration
+    if volume:
+        data['volume'] = volume
+    
+    result = client.make_request('POST', '/mode/start', json=data)
+    
+    click.secho(f"[MODE] {result['message']}", fg='green')
+    if 'track' in result:
+        click.echo(f"       Now playing: {result['track']}")
+    click.echo(f"       Duration: {result['duration']}")
+    click.echo(f"       Ends at: {client._format_time(result['ends_at'])}")
+
+
+@mode_group.command(name='stop')
+def mode_stop():
+    """Stop current mode and playback"""
+    result = client.make_request('POST', '/mode/stop')
+    click.secho(f"[STOP] {result['message']}", fg='yellow')
+
+
+@mode_group.command(name='create')
+@click.argument('name')
+@click.option('--based-on', help='Base new mode on existing mode')
+@click.option('--duration', default='1h', help='Default duration')
+@click.option('--volume', default=50, help='Default volume')
+@click.option('--description', help='Mode description')
+def mode_create(name, based_on, duration, volume, description):
+    """Create a custom mode"""
+    config = {
+        "duration": duration,
+        "volume": volume,
+        "description": description or f"Custom {name} mode"
+    }
+    
+    if based_on:
+        # Get base mode config first
+        base_result = client.make_request('GET', f'/mode/{based_on}')
+        if 'config' in base_result:
+            base_config = base_result['config']
+            base_config.update(config)
+            config = base_config
+    
+    data = {"name": name, "config": config}
+    result = client.make_request('POST', '/mode/create', json=data)
+    
+    click.secho(f"[OK] Created mode '{name}'", fg='green')
+    click.echo(f"     Description: {config['description']}")
+    click.echo(f"     Duration: {config['duration']}")
+    click.echo(f"     Volume: {config['volume']}")
+
+
+@mode_group.command(name='config')
+@click.argument('mode_name')
+@click.option('--duration', help='Set default duration')
+@click.option('--volume', type=int, help='Set default volume')
+@click.option('--description', help='Set description')
+def mode_config(mode_name, duration, volume, description):
+    """Configure an existing mode"""
+    updates = {}
+    if duration:
+        updates['duration'] = duration
+    if volume is not None:
+        updates['volume'] = volume
+    if description:
+        updates['description'] = description
+    
+    if not updates:
+        # Just show current config
+        result = client.make_request('GET', f'/mode/{mode_name}')
+        if 'config' in result:
+            config = result['config']
+            click.echo(f"\nMode '{mode_name}' configuration:")
+            for key, value in config.items():
+                click.echo(f"  {key}: {value}")
+    else:
+        # Update config
+        data = {"updates": updates}
+        result = client.make_request('PUT', f'/mode/{mode_name}', json=data)
+        click.secho(f"[OK] Updated mode '{mode_name}'", fg='green')
+
+
+@mode_group.command(name='delete')
+@click.argument('mode_name')
+@click.confirmation_option(prompt='Delete this mode?')
+def mode_delete(mode_name):
+    """Delete a custom mode"""
+    result = client.make_request('DELETE', f'/mode/{mode_name}')
+    click.secho(f"[OK] {result['message']}", fg='green')
+
+
+# Quick access commands at top level
+@cli.command()
+@click.option('--duration', '-d', help='Override default duration')
+def focus(duration):
+    """Quick start focus mode"""
+    data = {"mode": "focus"}
+    if duration:
+        data['duration'] = duration
+    
+    result = client.make_request('POST', '/mode/start', json=data)
+    click.secho(f"[FOCUS MODE] {result['message']}", fg='cyan')
+    if 'track' in result:
+        click.echo(f"             Now playing: {result['track']}")
+    click.echo(f"             Duration: {result['duration']}")
+
+
+@cli.command()
+@click.option('--duration', '-d', help='Override default duration')
+def party(duration):
+    """Quick start party mode"""
+    data = {"mode": "party"}
+    if duration:
+        data['duration'] = duration
+    
+    result = client.make_request('POST', '/mode/start', json=data)
+    click.secho(f"[PARTY MODE] {result['message']}", fg='magenta')
+    if 'track' in result:
+        click.echo(f"             Now playing: {result['track']}")
+    click.echo(f"             Duration: {result['duration']}")
+
+
+@cli.command()
+@click.option('--duration', '-d', help='Override default duration')
+def workout(duration):
+    """Quick start workout mode"""
+    data = {"mode": "workout"}
+    if duration:
+        data['duration'] = duration
+    
+    result = client.make_request('POST', '/mode/start', json=data)
+    click.secho(f"[WORKOUT MODE] {result['message']}", fg='red')
+    if 'track' in result:
+        click.echo(f"               Now playing: {result['track']}")
+    click.echo(f"               Duration: {result['duration']}")
+
+
+@cli.command()
+@click.option('--duration', '-d', help='Override default duration')
+def sleep(duration):
+    """Quick start sleep mode"""
+    data = {"mode": "sleep"}
+    if duration:
+        data['duration'] = duration
+    
+    result = client.make_request('POST', '/mode/start', json=data)
+    click.secho(f"[SLEEP MODE] {result['message']}", fg='blue')
+    if 'track' in result:
+        click.echo(f"             Now playing: {result['track']}")
+    click.echo(f"             Duration: {result['duration']}")
+
+# VOLUME & DEVICE COMMANDS
+@cli.command()
+@click.argument('level', required=False)
+def volume(level):
+    """Set or get volume (0-100 or +/-10)"""
+    if not level:
+        # Get current volume
+        try:
+            result = client.make_request('GET', '/volume')
+            click.echo(f"Current volume: {result['volume']}%")
+        except SystemExit:
+            pass
+    else:
+        # Set volume
+        data = {"volume": level}
+        result = client.make_request('POST', '/volume', json=data)
+        click.secho(f"[OK] Volume set to {result['volume']}%", fg='green')
+
+
+@cli.group(name='device', invoke_without_command=True)
+@click.pass_context  
+def device_group(ctx):
+    """Manage Spotify devices"""
+    if ctx.invoked_subcommand is None:
+        # Show devices if no subcommand
+        result = client.make_request('GET', '/devices')
+        devices = result.get('devices', [])
+        active = result.get('active_device')
+        
+        if not devices:
+            click.echo("No Spotify devices found")
+            return
+        
+        click.echo("Available Spotify devices:\n")
+        for device in devices:
+            status = "[ACTIVE]" if device['is_active'] else "        "
+            type_emoji = {
+                'Computer': '💻',
+                'Smartphone': '📱',
+                'Speaker': '🔊',
+                'TV': '📺',
+                'AVR': '🎚️',
+                'CastVideo': '📺',
+                'CastAudio': '🔊'
+            }.get(device['type'], '🎵')
+            
+            click.echo(f"{status} {type_emoji}  {device['name']}")
+            click.echo(f"         Type: {device['type']} | Volume: {device['volume']}%")
+            if device['is_restricted']:
+                click.echo(f"         ⚠️  Restricted device")
+            click.echo()
+
+
+@device_group.command(name='list')
+def device_list():
+    """List all available devices"""
+    result = client.make_request('GET', '/devices')
+    devices = result.get('devices', [])
+    
+    if not devices:
+        click.echo("No Spotify devices found")
+        return
+    
+    click.echo("Available Spotify devices:\n")
+    for i, device in enumerate(devices, 1):
+        active = "🟢" if device['is_active'] else "⚪"
+        click.echo(f"{active} [{i}] {device['name']}")
+        click.echo(f"      Type: {device['type']}")
+        click.echo(f"      Volume: {device['volume']}%")
+        click.echo(f"      ID: {device['id'][:8]}...")
+        click.echo()
+
+
+@device_group.command(name='switch')
+@click.argument('device_name')
+def device_switch(device_name):
+    """Switch playback to a different device"""
+    data = {"device": device_name}
+    result = client.make_request('POST', '/device/transfer', json=data)
+    
+    device = result.get('device', {})
+    click.secho(f"[OK] {result['message']}", fg='green')
+    click.echo(f"     Device type: {device.get('type', 'Unknown')}")
+    click.echo(f"     Volume: {device.get('volume', 0)}%")
+
+
+@device_group.command(name='transfer')
+@click.argument('device_name')
+def device_transfer(device_name):
+    """Transfer playback to device (alias for switch)"""
+    data = {"device": device_name}
+    result = client.make_request('POST', '/device/transfer', json=data)
+    
+    device = result.get('device', {})
+    click.secho(f"[OK] {result['message']}", fg='green')
+
+
+# Quick volume shortcuts
+@cli.command(name='vol')
+@click.argument('level')
+def vol(level):
+    """Quick volume control (shortcut for volume)"""
+    data = {"volume": level}
+    result = client.make_request('POST', '/volume', json=data)
+    click.secho(f"[OK] Volume: {result['volume']}%", fg='green')
+
+
+@cli.command(name='louder')
+@click.argument('amount', default=10)
+def louder(amount):
+    """Increase volume"""
+    data = {"volume": f"+{amount}"}
+    result = client.make_request('POST', '/volume', json=data)
+    click.secho(f"[OK] Volume increased to {result['volume']}%", fg='green')
+
+
+@cli.command(name='quieter')
+@click.argument('amount', default=10)
+def quieter(amount):
+    """Decrease volume"""
+    data = {"volume": f"-{amount}"}
+    result = client.make_request('POST', '/volume', json=data)
+    click.secho(f"[OK] Volume decreased to {result['volume']}%", fg='green')
+
+
+@cli.command(name='mute')
+def mute():
+    """Mute playback (set volume to 0)"""
+    data = {"volume": "0"}
+    result = client.make_request('POST', '/volume', json=data)
+    click.secho(f"[MUTED] Volume: 0%", fg='yellow')
 
 if __name__ == '__main__':
     cli()
