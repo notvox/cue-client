@@ -1,4 +1,3 @@
 nodenv/*
-notvox.rb
 */**/__pycache__/*
 */**/notvox.egg-info/*
