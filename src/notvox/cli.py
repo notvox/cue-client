@@ -14,8 +14,10 @@ from .modes import ModeManager
 
 # Default configuration
 DEFAULT_CONFIG = {"server_url": "http://localhost:8080", "timeout": 30}
-
 CONFIG_FILE = Path.home() / ".notvoxrc"
+
+# Default duration when none specified
+DEFAULT_DURATION = "full"
 
 
 class NotVoxClient:
@@ -71,43 +73,49 @@ class NotVoxClient:
             click.secho(f"[ERROR] {e}", fg="red")
             sys.exit(1)
 
-    def play_track(self, query, duration, quiet=False):
+    def play_track(self, query, duration=None, quiet=False):
         """Send play command to server"""
         if not quiet:
             click.echo(f"Searching for: {query}")
+
+        # Use default duration if not specified
+        if duration is None:
+            duration = DEFAULT_DURATION
 
         data = {"query": query, "duration": duration}
         result = self.make_request("POST", "/play", json=data)
 
         if not quiet:
             click.secho(f"[OK] {result['message']}", fg="green")
-            click.echo(f"     Duration: {result['duration']}")
+            if duration != "full":
+                click.echo(f"     Duration: {result['duration']}")
             click.echo(f"     Ends at: {self._format_time(result['ends_at'])}")
 
         return result
 
-    def play_lucky(self, duration):
+    def play_lucky(self, duration=None):
         """Play a random track from history or recommendations"""
         click.echo("Finding a lucky pick...")
+
+        # Use default duration if not specified
+        if duration is None:
+            duration = DEFAULT_DURATION
 
         data = {"duration": duration}
         result = self.make_request("POST", "/lucky", json=data)
 
         source = result["source"]
-        if source == "history-notvox":
-            source_text = "(From your NotVox history)"
-            source_color = "cyan"
-        elif source == "history-spotify":
-            source_text = "(From your Spotify history)"
-            source_color = "green"
-        else:
-            source_text = "(New recommendation based on your taste)"
-            source_color = "magenta"
+        source_colors = {
+            "history-notvox": ("cyan", "(From your NotVox history)"),
+            "history-spotify": ("green", "(From your Spotify history)"),
+        }
+        color, text = source_colors.get(source, ("magenta", "(New recommendation based on your taste)"))
 
-        click.secho(f"[LUCKY] {result['message']}", fg=source_color)
-        click.echo(f"        Duration: {result['duration']}")
+        click.secho(f"[LUCKY] {result['message']}", fg=color)
+        if duration != "full":
+            click.echo(f"        Duration: {result['duration']}")
         click.echo(f"        Ends at: {self._format_time(result['ends_at'])}")
-        click.echo(f"        {source_text}")
+        click.echo(f"        {text}")
 
         return result
 
@@ -149,11 +157,7 @@ class NotVoxClient:
         """Display playback history"""
         since = None
         if today_only:
-            since = (
-                datetime.now()
-                .replace(hour=0, minute=0, second=0, microsecond=0)
-                .isoformat()
-            )
+            since = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
         elif this_week:
             since = (datetime.now() - timedelta(days=7)).isoformat()
 
@@ -165,6 +169,13 @@ class NotVoxClient:
             return
 
         click.echo("Recent playback sessions:\n")
+
+        # Status formatting config
+        status_config = {
+            "completed": ("green", "[OK]"),
+            "stopped": ("yellow", "[STOP]"),
+            "playing": ("cyan", "[PLAY]")
+        }
 
         for i, session in enumerate(sessions, 1):
             # Format track name
@@ -180,15 +191,7 @@ class NotVoxClient:
 
             # Format status
             status = session["status"]
-            if status == "completed":
-                status_color = "green"
-                status_symbol = "[OK]"
-            elif status == "stopped":
-                status_color = "yellow"
-                status_symbol = "[STOP]"
-            else:
-                status_color = "cyan"
-                status_symbol = "[PLAY]"
+            status_color, status_symbol = status_config.get(status, ("cyan", "[PLAY]"))
 
             # Play count
             play_count = session.get("play_count", 1)
@@ -202,18 +205,27 @@ class NotVoxClient:
 
     def format_duration(self, seconds):
         """Format seconds to human readable duration"""
-        if seconds < 60:
-            return f"{seconds}s"
-        elif seconds < 3600:
-            return f"{seconds // 60}m"
-        elif seconds < 86400:
-            hours = seconds // 3600
-            minutes = (seconds % 3600) // 60
-            return f"{hours}h{minutes}m" if minutes else f"{hours}h"
-        else:
-            days = seconds // 86400
-            hours = (seconds % 86400) // 3600
-            return f"{days}d{hours}h" if hours else f"{days}d"
+        intervals = [
+            (86400, 'd', 'days'),
+            (3600, 'h', 'hours'),
+            (60, 'm', 'minutes'),
+            (1, 's', 'seconds')
+        ]
+        
+        for divisor, suffix, _ in intervals:
+            if seconds >= divisor:
+                value = seconds // divisor
+                remainder = seconds % divisor
+                
+                # For days and hours, show the next unit if there's a remainder
+                if suffix in ['d', 'h'] and remainder >= intervals[intervals.index((divisor, suffix, _)) + 1][0]:
+                    next_value = remainder // intervals[intervals.index((divisor, suffix, _)) + 1][0]
+                    next_suffix = intervals[intervals.index((divisor, suffix, _)) + 1][1]
+                    return f"{value}{suffix}{next_value}{next_suffix}"
+                else:
+                    return f"{value}{suffix}"
+        
+        return "0s"
 
     def format_relative_time(self, iso_time):
         """Format ISO time to relative time (e.g., '2 hours ago')"""
@@ -221,13 +233,15 @@ class NotVoxClient:
         now = datetime.now(dt.tzinfo) if dt.tzinfo else datetime.now()
         delta = now - dt
 
-        if delta.total_seconds() < 60:
+        seconds = delta.total_seconds()
+        
+        if seconds < 60:
             return "just now"
-        elif delta.total_seconds() < 3600:
-            minutes = int(delta.total_seconds() / 60)
+        elif seconds < 3600:
+            minutes = int(seconds / 60)
             return f"{minutes} minute{'s' if minutes != 1 else ''} ago"
-        elif delta.total_seconds() < 86400:
-            hours = int(delta.total_seconds() / 3600)
+        elif seconds < 86400:
+            hours = int(seconds / 3600)
             return f"{hours} hour{'s' if hours != 1 else ''} ago"
         elif delta.days == 1:
             return "yesterday"
@@ -253,13 +267,17 @@ class NotVoxClient:
         result = self.make_request("GET", "/search", params=params)
         return result
 
-    def play_track_uri(self, uri, name, duration):
+    def play_track_uri(self, uri, name, duration=None):
         """Play a specific track by URI"""
+        if duration is None:
+            duration = DEFAULT_DURATION
+            
         data = {"uri": uri, "name": name, "duration": duration}
         result = self.make_request("POST", "/play-uri", json=data)
 
         click.secho(f"[OK] {result['message']}", fg="green")
-        click.echo(f"     Duration: {result['duration']}")
+        if duration != "full":
+            click.echo(f"     Duration: {result['duration']}")
         click.echo(f"     Ends at: {self._format_time(result['ends_at'])}")
 
         return result
@@ -283,28 +301,17 @@ class NotVoxClient:
 
             # Popularity indicator
             pop = track["popularity"]
-            if pop >= 80:
-                pop_indicator = "[***]"
-            elif pop >= 60:
-                pop_indicator = "[** ]"
-            elif pop >= 40:
-                pop_indicator = "[*  ]"
-            else:
-                pop_indicator = "[   ]"
+            pop_indicator = "[***]" if pop >= 80 else "[** ]" if pop >= 60 else "[*  ]" if pop >= 40 else "[   ]"
 
             click.echo(f"[{i}] {track['name']} - {track['artist']}")
-            click.echo(
-                f"    Album: {track['album']} ({track_duration}) {pop_indicator}"
-            )
+            click.echo(f"    Album: {track['album']} ({track_duration}) {pop_indicator}")
             click.echo()
 
-        if select_mode and duration:
+        if select_mode:
             # Interactive selection
             while True:
                 try:
-                    choice = click.prompt(
-                        "\nSelect track number (or 0 to cancel)", type=int
-                    )
+                    choice = click.prompt("\nSelect track number (or 0 to cancel)", type=int)
                     if choice == 0:
                         click.echo("Cancelled.")
                         return None
@@ -314,10 +321,7 @@ class NotVoxClient:
                         self.play_track_uri(selected["uri"], track_name, duration)
                         return selected
                     else:
-                        click.secho(
-                            f"Please enter a number between 1 and {len(tracks)}",
-                            fg="yellow",
-                        )
+                        click.secho(f"Please enter a number between 1 and {len(tracks)}", fg="yellow")
                 except (ValueError, EOFError, KeyboardInterrupt):
                     click.echo("\nCancelled.")
                     return None
@@ -329,9 +333,7 @@ class NotVoxClient:
         if select:
             # Show recent stopped sessions to choose from
             history = self.get_history(limit=10)
-            stopped_sessions = [
-                s for s in history.get("sessions", []) if s["status"] == "stopped"
-            ]
+            stopped_sessions = [s for s in history.get("sessions", []) if s["status"] == "stopped"]
 
             if not stopped_sessions:
                 click.secho("[ERROR] No stopped sessions to resume", fg="red")
@@ -351,9 +353,7 @@ class NotVoxClient:
 
             while True:
                 try:
-                    choice = click.prompt(
-                        "\nSelect session to resume (or 0 to cancel)", type=int
-                    )
+                    choice = click.prompt("\nSelect session to resume (or 0 to cancel)", type=int)
                     if choice == 0:
                         click.echo("Cancelled.")
                         return None
@@ -366,15 +366,10 @@ class NotVoxClient:
                         result = self.make_request("POST", "/resume", json=data)
                         click.secho(f"[OK] {result['message']}", fg="green")
                         click.echo(f"     Duration: {result['duration']}")
-                        click.echo(
-                            f"     Ends at: {self._format_time(result['ends_at'])}"
-                        )
+                        click.echo(f"     Ends at: {self._format_time(result['ends_at'])}")
                         return result
                     else:
-                        click.secho(
-                            f"Please enter a number between 1 and {len(stopped_sessions)}",
-                            fg="yellow",
-                        )
+                        click.secho(f"Please enter a number between 1 and {len(stopped_sessions)}", fg="yellow")
                 except (ValueError, EOFError, KeyboardInterrupt):
                     click.echo("\nCancelled.")
                     return None
@@ -439,32 +434,30 @@ class NotVoxClient:
                 relative_time = self.format_relative_time(track["played_at"])
 
                 click.echo(f"{i:2d}. {name}")
-                play_indicator = (
-                    f"(played {play_count}x recently)" if play_count > 1 else ""
-                )
+                play_indicator = f"(played {play_count}x recently)" if play_count > 1 else ""
                 click.echo(f"    {relative_time} {play_indicator}")
 
         if not notvox_sessions and not spotify_tracks:
             click.echo("No playback history found.")
         else:
             click.echo()
-            click.echo(
-                "Lucky mode uses this combined history to pick tracks you'll enjoy!"
-            )
+            click.echo("Lucky mode uses this combined history to pick tracks you'll enjoy!")
 
-    def add_to_queue(self, query, duration):
+    def add_to_queue(self, query, duration=None):
         """Add track to queue"""
+        if duration is None:
+            duration = DEFAULT_DURATION
+            
         data = {"query": query, "duration": duration}
         result = self.make_request("POST", "/queue/add", json=data)
 
-        if result.get("position") == 1 and "started playing" in result.get(
-            "message", ""
-        ):
+        if result.get("position") == 1 and "started playing" in result.get("message", ""):
             click.secho(f"[OK] {result['message']}", fg="green")
         else:
             click.secho(f"[QUEUED] {result['message']}", fg="cyan")
             click.echo(f"         Position in queue: #{result['position']}")
-            click.echo(f"         Duration: {result['duration']}")
+            if duration != "full":
+                click.echo(f"         Duration: {result['duration']}")
 
         return result
 
@@ -507,10 +500,7 @@ class NotVoxClient:
         queue_items = queue_data.get("queue", [])
 
         if position < 1 or position > len(queue_items):
-            click.secho(
-                f"[ERROR] Invalid position. Queue has {len(queue_items)} items.",
-                fg="red",
-            )
+            click.secho(f"[ERROR] Invalid position. Queue has {len(queue_items)} items.", fg="red")
             return None
 
         item = queue_items[position - 1]
@@ -546,14 +536,15 @@ def cli():
     Common commands:
 
     \b
+      notvox cue "song name"         Play a song (full track)
       notvox cue "song name" 2h      Play a song for 2 hours
-      notvox queue add "song" 30m    Add to playback queue
-      notvox status                   Check what's currently playing
-      notvox skip                     Skip to next in queue
-      notvox stop                     Stop current playback
+      notvox queue add "song"        Add to queue (full track)
+      notvox status                  Check what's currently playing
+      notvox skip                    Skip to next in queue
+      notvox stop                    Stop current playback
 
     \b
-    Duration formats: 30m, 2h, 1d, 90s
+    Duration formats: 30m, 2h, 1d, 90s, full (default)
 
     Use 'notvox COMMAND --help' for more information on a command.
     """
@@ -571,9 +562,9 @@ class CueGroup(click.Group):
         
         # Otherwise, handle direct cue command
         args = ctx.args
-        if len(args) >= 2:
+        if len(args) >= 1:
             query = args[0]
-            duration = args[1]
+            duration = args[1] if len(args) >= 2 else None
             
             # Check for flags
             if '--lucky' in args or ctx.params.get('lucky'):
@@ -595,14 +586,15 @@ def cue_group(ctx, lucky, select):
     """Play music for a specified duration
 
     Quick usage:
-      notvox cue "song name" 2h
+      notvox cue "song name"           # Play full track
+      notvox cue "song name" 2h        # Play for 2 hours
 
     Or use subcommands for specific content types:
-      notvox cue playlist "Chill Vibes" 2h
-      notvox cue album "Dark Side of the Moon" full
-      notvox cue artist "Bon Iver" 1h
+      notvox cue playlist "Chill Vibes"      # Play full playlist
+      notvox cue album "Dark Side of the Moon" 45m
+      notvox cue artist "Bon Iver"           # Play all top tracks
       notvox cue radio "Clair de Lune" 2h
-      notvox cue genre jazz 30m
+      notvox cue genre jazz                  # Continuous jazz
     """
     # Context is handled by the custom group class
     pass
@@ -610,7 +602,7 @@ def cue_group(ctx, lucky, select):
 
 @cue_group.command(name='track')
 @click.argument('track_name')
-@click.argument('duration')
+@click.argument('duration', required=False)
 @click.option('--select', '-s', is_flag=True, help='Select from results')
 def cue_track(track_name, duration, select):
     """Play a specific track"""
@@ -622,7 +614,7 @@ def cue_track(track_name, duration, select):
 
 @cue_group.command(name='playlist')
 @click.argument('playlist_name')
-@click.argument('duration')
+@click.argument('duration', required=False)
 def cue_playlist(playlist_name, duration):
     """Play a playlist"""
     query = f"playlist:{playlist_name}"
@@ -631,7 +623,7 @@ def cue_playlist(playlist_name, duration):
 
 @cue_group.command(name='album')
 @click.argument('album_name')
-@click.argument('duration')
+@click.argument('duration', required=False)
 def cue_album(album_name, duration):
     """Play an album"""
     query = f"album:{album_name}"
@@ -640,7 +632,7 @@ def cue_album(album_name, duration):
 
 @cue_group.command(name='artist')
 @click.argument('artist_name')
-@click.argument('duration')
+@click.argument('duration', required=False)
 def cue_artist(artist_name, duration):
     """Play an artist's top tracks"""
     query = f"artist:{artist_name}"
@@ -649,7 +641,7 @@ def cue_artist(artist_name, duration):
 
 @cue_group.command(name='radio')
 @click.argument('seed_song')
-@click.argument('duration')
+@click.argument('duration', required=False)
 def cue_radio(seed_song, duration):
     """Create a radio station based on a song"""
     query = f"radio:{seed_song}"
@@ -658,7 +650,7 @@ def cue_radio(seed_song, duration):
 
 @cue_group.command(name='genre')
 @click.argument('genre_name')
-@click.argument('duration')
+@click.argument('duration', required=False)
 def cue_genre(genre_name, duration):
     """Play music by genre"""
     query = f"genre:{genre_name}"
@@ -668,7 +660,7 @@ def cue_genre(genre_name, duration):
 # Keep the standalone shortcuts for convenience
 @cli.command()
 @click.argument('genre_name')
-@click.argument('duration', default='1h')
+@click.argument('duration', required=False, default='1h')
 def genre(genre_name, duration):
     """Quick play music by genre (shortcut for 'cue genre')"""
     query = f"genre:{genre_name}"
@@ -677,7 +669,7 @@ def genre(genre_name, duration):
 
 @cli.command()
 @click.argument('song_name')
-@click.argument('duration', default='1h')
+@click.argument('duration', required=False, default='1h')
 def radio(song_name, duration):
     """Create a radio station (shortcut for 'cue radio')"""
     query = f"radio:{song_name}"
@@ -692,7 +684,7 @@ def quietly_group():
 
 @quietly_group.command(name='cue')
 @click.argument('query')
-@click.argument('duration')
+@click.argument('duration', required=False)
 def quietly_cue(query, duration):
     """Play a track quietly (minimal output)"""
     client.play_track(query, duration, quiet=True)
@@ -749,7 +741,7 @@ def history(limit, today, this_week, combined):
 
 
 @cli.command()
-@click.argument('duration')
+@click.argument('duration', required=False)
 def lucky(duration):
     """Play a random track based on your taste"""
     client.play_lucky(duration)
@@ -787,7 +779,7 @@ def queue_group(ctx):
 
 @queue_group.command(name='add')
 @click.argument('query')
-@click.argument('duration')
+@click.argument('duration', required=False)
 def queue_add(query, duration):
     """Add a track to the queue"""
     client.add_to_queue(query, duration)

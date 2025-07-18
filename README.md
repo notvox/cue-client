@@ -1,5 +1,6 @@
 # cue-client
 (noun) : something clever never
+::: **meant for no one but myself. if you find it interesting see below.**
 
 ### what is this?
 this is a little tool that started as a way to troll people who were being nosy about my listening habits.  
